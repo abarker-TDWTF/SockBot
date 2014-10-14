@@ -4,10 +4,64 @@
 
     var async = require('async'),
         xRegExp = require('xregexp').XRegExp,
-        matcher = '(^|\\s)(?<num>-?\\d+)(d(?<sides>-?\\d+)|(\\s?(?<method>S|SS|Scion|W|WW|Wolf|M|MM|Mage|F|FF|Fudge|Fate|C|CC|Coin)))(t(?<target>\\d+))?(?<options>[pr]+)?($|\\s)',
-        rmatcher = xRegExp(matcher, 'i'),
+        parser,
         m_browser,
         m_config;
+
+    //The parse is complicated. don't let it leak
+    (function () {
+        var p_num = '(?<num>-?\\d+)',
+            p_sides = '(?<sides>-?\\d+)',
+            p_method = '(?<method>W|Wolf|F|Fate|Fudge)',
+            p_target = '(?:t(?<target>\\d+))',
+            p_bonus = '(?:b(?<bonus>-?\\d+))',
+            p_options = '(?<options>[pfrs]+)',
+            p_matcher = '\\b' + p_num + '?d(' + p_sides + '|' + p_method + ')(?<optional>' + p_target + '|' + p_bonus + '|' + p_options + ')*\\b',
+            r_target = xRegExp(p_target, 'i'),
+            r_bonus = xRegExp(p_bonus, 'i'),
+            r_options = xRegExp(p_options, 'i'),
+            r_matcher = xRegExp(p_matcher, 'i');
+        parser = function parser(input, each, complete) {
+            var match = 1,
+                pos = 0;
+            async.until(
+                function () {
+                    return !match;
+                },
+                function (next) {
+                    var target,
+                        bonus,
+                        options,
+                        inner,
+                        matched = {};
+                    match = r_matcher.xexec(input, pos);
+                    if (match) {
+                        inner = match[0] || '';
+                        target = r_target.xexec(inner);
+                        bonus = r_bonus.xexec(inner);
+                        options = r_options.xexec(inner);
+
+                        matched.num = match.num ? parseInt(match.num, 10) : undefined;
+                        matched.sides = match.sides ? parseInt(match.sides, 10) : undefined;
+                        matched.method = match.method ? match.method.toLowerCase() : undefined;
+                        matched.target = (target && target.target) ? parseInt(target.target, 10) : undefined;
+                        matched.options = ((options || {}).options || '').toLowerCase();
+                        matched.bonus = (bonus && bonus.bonus) ? parseInt(bonus.bonus, 10) : undefined;
+                        matched.reroll = matched.options.indexOf('r') !== -1;
+                        matched.preroll = matched.options.indexOf('p') !== -1;
+                        matched.sort = matched.options.indexOf('s') !== -1;
+                        matched.fails = matched.options.indexOf('f') !== -1;
+                        pos = match.index + match[0].length - 1;
+                        each(matched, next);
+                    } else {
+                        next(true);
+                    }
+                },
+                complete
+            );
+
+        };
+    }());
 
     function getDiceFromServer(num, sides, rerollGreater, callback) {
         var factor = sides < 0 ? -1 : 1,
@@ -21,6 +75,11 @@
         }
         if (sides < 0) {
             sides *= -1;
+        }
+        if (!num || !sides) {
+            callback(0, [
+                []
+            ]);
         }
         toRoll = num;
         async.whilst(
@@ -88,19 +147,109 @@
         return ct;
     }
 
+    function rollWolfDice(match, callback) {
+        var criticals;
+        if (match.reroll) {
+            criticals = 10;
+        }
+        if (!match.num) {
+            match.num = 10;
+        }
+        if (!match.target) {
+            match.target = 8;
+        }
+        getDiceFromServer(match.num, 10, criticals, function (sum, dice) {
+            var result = sum,
+                successes = 0,
+                mapper = function mapper(v) {
+                    if (v >= match.target) {
+                        successes += 1;
+                        return v.toString() + 'S';
+                    }
+                    return v.toString();
+                };
+            result = 'Rolling ' + match.num + 'd10 Target: ' + match.target + ': ';
+            if (match.options.indexOf('p') >= 0) {
+                result += 'Prerolling ' + prerollDice(match.num, 10) + ' times: ';
+            }
+            result += dice.shift().map(mapper).join(', ');
+            if (dice.length > 0) {
+                dice.forEach(function (d) {
+                    result += '\nRerolling ' + d.length + 'd10: ';
+                    result += d.map(mapper).join(', ');
+                });
+                result += '\n';
+            }
+            if (match.bonus) {
+                result += ' Bonus: ' + match.bonus;
+                successes += match.bonus;
+            }
+            result += ' Successes: ' + successes;
+            callback(result);
+        });
+    }
 
-
-    function rollXDice(match, callback) {
-        var num = parseInt(match.num, 10),
-            sides = parseInt(match.sides, 10),
-            crit,
-            result = 'Rolling ' + num + 'd' + sides + ': ';
-
-        if (isNaN(num) || isNaN(sides)) {
+    function rollFudgeDice(match, callback) {
+        if (!match.num) {
+            match.num = 4;
+        }
+        var result = 'Rolling ' + match.num + ' dice of Fate: ';
+        if (isNaN(match.num) || match.num < 1) {
             callback(result + getError());
             return;
         }
-        if (num > m_config.diceMaxDice) {
+        if (match.num > (m_config.diceMaxDice || 20)) {
+            callback(result + 'Error Too many dice requested');
+            return;
+        }
+        getDiceFromServer(match.num, 6, undefined, function (sum, dice) {
+            var total = sum;
+            total = dice[0].reduce(function (i, v) {
+                if (v < 3) {
+                    return i - 1;
+                }
+                if (v > 4) {
+                    return i + 1;
+                }
+                return i;
+
+            }, 0);
+            dice = dice[0].map(function (v) {
+                if (v < 3) {
+                    return '-';
+                }
+                if (v > 4) {
+                    return '+';
+                }
+                return '0';
+
+            });
+            result += dice.join('');
+            if (match.bonus) {
+                total += match.bonus;
+                result += ' Bonus: ' + match.bonus;
+            }
+            result += 'Total: ' + total;
+            callback(result);
+        });
+    }
+
+
+    function rollXDice(match, callback) {
+        var num = match.num,
+            sides = match.sides,
+            crit,
+            result;
+
+        if (num === undefined) {
+            num = 1;
+        }
+        result = 'Rolling ' + num + 'd' + sides + ': ';
+        if (isNaN(num) || isNaN(sides) || !num) {
+            callback(result + getError());
+            return;
+        }
+        if (num > (m_config.diceMaxDice || 20)) {
             callback(result + 'Error Too many dice requested');
             return;
         }
@@ -108,14 +257,16 @@
             callback(result + 'Sum : ' + num);
             return;
         }
-        if (match.options && match.options.toLowerCase().indexOf('p') >= 0) {
+        if (match.options && match.options.indexOf('p') >= 0) {
             result += 'Prerolling ' + prerollDice(num, sides) + ' times: ';
         }
-        if (match.options && match.options.toLowerCase().indexOf('r') >= 0) {
+        if (match.options && match.options.indexOf('r') >= 0) {
             crit = sides;
         }
         getDiceFromServer(num, sides, crit, function (sum, dice) {
-            result += dice.shift().join(', ');
+            var d = dice.shift();
+
+            result += d.join(', ');
             if (dice.length > 0) {
                 dice.forEach(function (d) {
                     result += '\nRerolling ' + d.length + ' Crits:' + d.join(', ');
@@ -125,6 +276,10 @@
             if (isNaN(sum)) {
                 result += ' ' + getError();
             } else if (Math.abs(num) > 1) {
+                if (match.bonus) {
+                    sum += match.bonus;
+                    result += ' Bonus: ' + match.bonus;
+                }
                 result += ' Sum: ' + sum * (num < 0 ? -1 : 1);
             }
             callback(result);
@@ -132,58 +287,44 @@
     }
 
     function rollDice(match, callback) {
-        if (match.sides) {
+        if (!match.method) {
             rollXDice(match, callback);
+        } else if (match.method[0] === 'f') {
+            rollFudgeDice(match, callback);
+        } else if (match.method[0] === 'w') {
+            rollWolfDice(match, callback);
         } else {
             callback('Not implemented');
         }
     }
 
     function rollAllDice(input, callback) {
-        var match = 1,
-            pos = 0,
-            results = [];
-        async.until(
-            function () {
-                return !match;
-            },
-            function (next) {
-                match = rmatcher.xexec(input, pos);
-                if (match) {
-                    pos = match.index + match[0].length - 1;
-                    if (results.length >= m_config.diceMaxRolls) {
-                        results.push('Reached maximum dice roll. stopping.');
-                        next(true);
-                    } else {
-                        rollDice(match, function (line) {
-                            results.push(line);
-                            next();
-                        });
-                    }
+        var results = [];
+        parser(input,
+            function (match, next) {
+                if (results.length >= (m_config.diceMaxRolls || 6)) {
+                    results.push('Reached maximum dice roll. stopping.');
+                    next(true);
                 } else {
-                    next();
+                    rollDice(match, function (line) {
+                        results.push(line);
+                        next();
+                    });
                 }
             },
-            function (err) {
-                if (err) {
-                    results.push(results.pop()); // TODO: figurter noop
-                }
+            function () {
                 callback(results);
-            }
-        );
+            });
     }
 
     exports.name = "DiceMaster 1.0.0";
     exports.onNotify = function (type, notification, post, callback) {
-        if (!m_config.dicemaster || !post || !post.raw || ['private_message', 'mentioned', 'replied'].indexOf(type) === -1) {
+        if (!m_config.dicemaster || !post || !post.cleaned || ['private_message', 'mentioned', 'replied'].indexOf(type) === -1) {
             callback();
             return;
         }
 
-        //8 and up is success in mage
-        console.log(post.raw);
-
-        rollAllDice(post.raw, function (dice) {
+        rollAllDice(post.cleaned, function (dice) {
             var result = dice.join("\n\n").trim();
             if (result) {
                 m_browser.reply_topic(notification.topic_id, notification.post_number, result, callback);

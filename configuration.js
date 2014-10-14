@@ -13,6 +13,10 @@
             'readifyWait': 24 * 60 * 60 * 1000, // 24 hours
         };
 
+/**
+ * @callback sock_module.Callback
+ */
+
     function merge() {
         var i = 0,
             res = {},
@@ -31,5 +35,14 @@
         return res;
     }
 
-    exports.configuration = merge(def, conf);
+    function getAlt() {
+        try {
+            return require('./.SockBot.conf.json');
+        } catch (e) {
+            console.warn('Alternate conf file not found: ' + e);
+            return {};
+        }
+    }
+
+    exports.configuration = merge(def, conf, getAlt());
 }());

@@ -2,6 +2,7 @@
 (function () {
     'use strict';
     var async = require('async'),
+        xRegExp = require('xregexp').XRegExp,
         browser = require('./browser'),
         notify_time = (new Date().getTime()),
         sock_modules,
@@ -18,7 +19,21 @@
             10: 'moved_post',
             11: 'linked',
             12: 'granted_badge'
-        };
+        },
+        r_quote = xRegExp('\\[quote(?:(?!\\[/quote\\]).)*\\[/quote\\]', 'sgi'),
+        r_close_quote = xRegExp('\\[/quote\\]', 'sgi');
+
+
+    function uuid(a) {
+        //I don't understand how this does what it does, but it works.
+        // It's a lot slower than using node-uuid but i only need one of these so its good enough
+        // Source: http://jsperf.com/node-uuid-performance/19
+        return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
+            var r = Math.random() * 16 | 0,
+                v = c === 'x' ? r : (r & 0x3 | 0x8);
+            return v.toString(16);
+        });
+    }
 
     function process_notification(notification, post, callback) {
         async.eachSeries(sock_modules,
@@ -51,6 +66,8 @@
                     if (err || resp.statusCode >= 300) {
                         console.error('Error loading post #' + notify.data.original_post_id);
                         post = undefined;
+                    } else {
+                        post.cleaned = xRegExp.replace(xRegExp.replace(post.raw, r_quote, ''), r_close_quote, '');
                     }
                     process_notification(notify, post, cb);
                 });
@@ -65,13 +82,13 @@
         async.forever(function (next) {
             browser.getContent('/notifications', function (err, resp, notifications) {
                 if (err || resp.statusCode >= 300 || !notifications || typeof notifications !== 'object' || typeof notifications.filter !== 'function') {
-                    setTimeout(next, 0.2 * 1000);
+                    setTimeout(next, 5 * 1000);
                     return;
                 }
                 var next_notify = Date.parse(notifications[0].created_at) + 1;
                 process_notifications(notifications, function () {
                     notify_time = next_notify;
-                    setTimeout(next, 0.2 * 1000);
+                    setTimeout(next, 5 * 1000);
                 });
             });
         }, function () {
