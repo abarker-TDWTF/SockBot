@@ -3,13 +3,14 @@
     'use strict';
     var fs = require('fs'),
         async = require('async'),
-        browser = require('./browser'),
-        queue = require('./queue'),
-        config = require('./configuration').configuration,
-        sock_modules = [];
+        config = require('./configuration'),
+        admin = require('./admin');
+    var browser,
+        messageBus,
+        sockModules = [];
 
     async.waterfall([
-
+        admin.load,
         function (cb) {
             fs.readdir('./sock_modules/', cb);
         },
@@ -18,24 +19,55 @@
                 return name[0] !== '.' && /[.]js$/.test(name);
             }).forEach(function (name) {
                 var module = require('./sock_modules/' + name);
-                sock_modules.push(module);
-                console.log('Loaded module: ' + module.name);
+                if (isNaN(module.priority)) {
+                    module.priority = 50;
+                }
+                if (!module.configuration || module.configuration.enabled) {
+                    console.warn('Ingoring module: `' + (module.name || name) +
+                        '` Does not default to disabled');
+                } else {
+                    sockModules.push(module);
+                    console.log('Loaded module: ' +
+                        module.name + ' v' + module.version);
+                }
+            });
+            sockModules.sort(function (a, b) {
+                return a.priority - b.priority;
             });
             cb();
         },
-        function () {
-            browser.authenticate(config.username, config.password, function () {
-                config.user = browser.user;
-                sock_modules.forEach(function (module) {
-                    if (typeof module.begin !== 'function') {
-                        return;
-                    }
-                    console.log('Starting module: ' + module.name);
-                    module.begin(browser, config);
-                });
-                queue.begin(sock_modules);
-
+        function (cb) {
+            config = config.loadConfiguration(sockModules, admin,
+                process.argv[2]);
+            browser = require('./discourse');
+            messageBus = require('./messageBus');
+            sockModules = sockModules.filter(function (module) {
+                return config.modules[module.name].enabled;
             });
+            sockModules.unshift(admin);
+            admin.setModules(sockModules);
+            cb();
+        },
+        function (cb) {
+            browser.login(function () {
+                cb();
+            });
+        },
+        function (cb) {
+            if (!config.user) {
+                // login failed. what can we do?
+                throw 'Login failed';
+            }
+            console.log('Logged in as: ' + config.user.user.username);
+            sockModules.forEach(function (module) {
+                if (typeof module.begin !== 'function') {
+                    return;
+                }
+                console.log('Starting module: ' + module.name);
+                module.begin(browser, config);
+            });
+            messageBus.begin(sockModules, admin);
+            cb();
         }
     ]);
 }());
